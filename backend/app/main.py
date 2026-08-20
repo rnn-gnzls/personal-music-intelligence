@@ -1,26 +1,29 @@
 from fastapi import FastAPI
 
-from app.api.routes.health import router as health_router
-from app.core.config import settings
+from app.api.v1.spotify import router as spotify_router
+from app.api.v1.users import router as users_router
 
 
 app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description=(
-        "Backend API for a personalized music intelligence "
-        "and discovery platform."
-    ),
+    title="Personal Music Intelligence API",
+    version="0.1.0",
+)
+
+
+app.include_router(
+    users_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    spotify_router,
+    prefix="/api/v1",
 )
 
 
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to the Personal Music Intelligence API",
-        "version": settings.app_version,
-        "environment": settings.environment,
+        "message": "Personal Music Intelligence API",
+        "status": "running",
     }
-
-
-app.include_router(health_router)

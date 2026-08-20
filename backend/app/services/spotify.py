@@ -1,0 +1,143 @@
+import base64
+from urllib.parse import urlencode
+
+import httpx
+
+from app.core.config import settings
+
+
+SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_API_URL = "https://api.spotify.com/v1"
+
+
+SCOPES = [
+    "user-read-email",
+    "user-read-private",
+    "user-read-recently-played",
+    "user-top-read",
+]
+
+
+def get_authorization_url() -> str:
+    params = {
+        "client_id": settings.spotify_client_id,
+        "response_type": "code",
+        "redirect_uri": settings.spotify_redirect_uri,
+        "scope": " ".join(SCOPES),
+    }
+
+    return f"{SPOTIFY_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+async def exchange_code_for_token(code: str) -> dict:
+    credentials = (
+        f"{settings.spotify_client_id}:{settings.spotify_client_secret}"
+    )
+
+    encoded_credentials = base64.b64encode(
+        credentials.encode()
+    ).decode()
+
+    headers = {
+        "Authorization": f"Basic {encoded_credentials}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": settings.spotify_redirect_uri,
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            SPOTIFY_TOKEN_URL,
+            headers=headers,
+            data=data,
+        )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+async def get_current_user(access_token: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{SPOTIFY_API_URL}/me",
+            headers=headers,
+        )
+
+    response.raise_for_status()
+
+    return response.json()
+
+# getting the user's spoti profile 
+async def spotify_get(
+    access_token: str,
+    endpoint: str,
+    params: dict | None = None,
+) -> dict:
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{SPOTIFY_API_URL}{endpoint}",
+            headers=headers,
+            params=params,
+        )
+
+    response.raise_for_status()
+
+    return response.json()
+
+# getting the user's top artists
+async def get_top_artists(
+    access_token: str,
+    time_range: str = "medium_term",
+) -> dict:
+
+    return await spotify_get(
+        access_token,
+        "/me/top/artists",
+        {
+            "time_range": time_range,
+            "limit": 50,
+        },
+    )
+
+# getting the user's top tracks
+async def get_top_tracks(
+    access_token: str,
+    time_range: str = "medium_term",
+) -> dict:
+
+    return await spotify_get(
+        access_token,
+        "/me/top/tracks",
+        {
+            "time_range": time_range,
+            "limit": 50,
+        },
+    )
+
+# getting the user's recently played tracks (up to 50 tracks)
+async def get_recently_played(
+    access_token: str,
+) -> dict:
+
+    return await spotify_get(
+        access_token,
+        "/me/player/recently-played",
+        {
+            "limit": 50,
+        },
+    )
