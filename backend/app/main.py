@@ -2,13 +2,12 @@ from fastapi import FastAPI
 
 from app.api.v1.spotify import router as spotify_router
 from app.api.v1.users import router as users_router
-
+from app.api.v1.analytics import router as analytics_router
 
 app = FastAPI(
-    title="Personal Music Intelligence API",
+    title="vibe.ai",
     version="0.1.0",
 )
-
 
 app.include_router(
     users_router,
@@ -20,6 +19,10 @@ app.include_router(
     prefix="/api/v1",
 )
 
+app.include_router(
+    analytics_router,
+    prefix="/api/v1",
+)
 
 @app.get("/")
 async def root():

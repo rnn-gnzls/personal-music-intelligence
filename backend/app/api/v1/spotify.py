@@ -18,6 +18,12 @@ from app.db.dependencies import get_db
 from app.db.models.spotify_account import SpotifyAccount
 from app.db.models.user import User
 
+from app.db.dependencies import get_db
+from app.services.spotify_ingestion import sync_spotify_data
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends
+from uuid import UUID
+
 router = APIRouter(
     prefix="/spotify",
     tags=["Spotify"],
@@ -124,3 +130,29 @@ async def test_spotify_data():
         status_code=501,
         detail="This endpoint is not implemented yet.",
     )
+
+@router.post("/sync/{user_id}")
+async def sync_spotify(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+
+        result = await sync_spotify_data(
+            db,
+            user_id,
+        )
+
+        return {
+            "message": "Spotify data synchronized successfully.",
+            "data": result,
+        }
+
+    except Exception as exc:
+
+        await db.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
