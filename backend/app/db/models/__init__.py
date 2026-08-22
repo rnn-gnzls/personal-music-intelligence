@@ -6,6 +6,7 @@ from app.db.models.track import Track
 from app.db.models.listening_history import ListeningHistory
 from app.db.models.track_features import TrackFeatures
 from app.db.models.user_preferences import UserPreferences
+from app.db.models.spotify_sync_log import SpotifySyncLog
 
 __all__ = [
     "User",
@@ -16,4 +17,5 @@ __all__ = [
     "ListeningHistory",
     "TrackFeatures",
     "UserPreferences",
+    "SpotifySyncLog"
 ]

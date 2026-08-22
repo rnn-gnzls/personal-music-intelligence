@@ -74,10 +74,12 @@ async def spotify_callback(
 
         spotify_user_id = spotify_user["id"]
 
-        token_expires_at = (
+        token_expires_at=(
             datetime.now(timezone.utc)
-            + timedelta(seconds=expires_in)
-        )
+            + timedelta(
+                seconds=token_data["expires_in"]
+            )
+        ),
 
         existing_account = await db.scalar(
             select(SpotifyAccount).where(

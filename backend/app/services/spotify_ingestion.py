@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,11 +7,13 @@ from app.db.models.artist import Artist
 from app.db.models.track import Track
 from app.db.models.listening_history import ListeningHistory
 from app.db.models.spotify_account import SpotifyAccount
+from app.db.models.spotify_sync_log import SpotifySyncLog
 
 from app.services.spotify import (
     get_recently_played,
     get_top_artists,
     get_top_tracks,
+    get_valid_access_token,
 )
 
 async def get_spotify_account(
@@ -251,55 +253,99 @@ async def sync_spotify_data(
     db: AsyncSession,
     user_id,
 ):
+    started_at = datetime.now(timezone.utc)
 
-    account = await get_spotify_account(
-        db,
-        user_id,
+    sync_log = SpotifySyncLog(
+        user_id=user_id,
+        started_at=started_at,
+        status="running",
     )
 
-    access_token = account.access_token
+    db.add(sync_log)
+    await db.flush()
 
-    top_artists_data = await get_top_artists(
-        access_token
-    )
+    try:
+        account = await get_spotify_account(
+            db,
+            user_id,
+        )
 
-    top_tracks_data = await get_top_tracks(
-        access_token
-    )
+        access_token = await get_valid_access_token(
+            account
+        )
 
-    recently_played_data = await get_recently_played(
-        access_token
-    )
+        top_artists_data = await get_top_artists(
+            access_token
+        )
 
-    await sync_artists(
-        db,
-        access_token,
-        top_artists_data["items"],
-    )
+        top_tracks_data = await get_top_tracks(
+            access_token
+        )
 
-    await sync_tracks(
-        db,
-        top_tracks_data["items"],
-    )
+        recently_played_data = await get_recently_played(
+            access_token
+        )
 
-    await sync_tracks(
-        db,
-        [
-            item["track"]
-            for item in recently_played_data["items"]
-        ],
-    )
+        artist_count = await sync_artists(
+            db,
+            access_token,
+            top_artists_data["items"],
+        )
 
-    recent_count = await sync_recently_played(
-        db,
-        user_id,
-        recently_played_data["items"],
-    )
+        await sync_tracks(
+            db,
+            top_tracks_data["items"],
+        )
 
-    await db.commit()
+        await sync_tracks(
+            db,
+            [
+                item["track"]
+                for item in recently_played_data["items"]
+            ],
+        )
 
-    return {
-        "artists": len(top_artists_data["items"]),
-        "top_tracks": len(top_tracks_data["items"]),
-        "recently_played": recent_count,
-    }
+        recent_count = await sync_recently_played(
+            db,
+            user_id,
+            recently_played_data["items"],
+        )
+
+        sync_log.completed_at = datetime.now(
+            timezone.utc
+        )
+
+        sync_log.status = "success"
+
+        sync_log.artists_synced = artist_count
+
+        sync_log.tracks_synced = (
+            len(top_tracks_data["items"])
+            + len(recently_played_data["items"])
+        )
+
+        sync_log.history_synced = recent_count
+
+        await db.commit()
+
+        return {
+            "artists": artist_count,
+            "top_tracks": len(
+                top_tracks_data["items"]
+            ),
+            "recently_played": recent_count,
+            "status": "success",
+        }
+
+    except Exception as exc:
+        sync_log.completed_at = datetime.now(
+            timezone.utc
+        )
+
+        sync_log.status = "failed"
+
+        sync_log.error_message = str(exc)
+
+        await db.commit()
+
+        raise

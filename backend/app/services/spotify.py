@@ -4,6 +4,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.core.config import settings
+from datetime import datetime, timedelta, timezone
 
 SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -147,3 +148,36 @@ async def refresh_access_token(refresh_token: str) -> dict:
     response.raise_for_status()
 
     return response.json()
+
+def is_token_expired(
+    token_expires_at: datetime,
+) -> bool:
+    return datetime.now(timezone.utc) >= token_expires_at
+
+async def get_valid_access_token(
+    account,
+) -> str:
+    if not is_token_expired(account.token_expires_at):
+        return account.access_token
+
+    token_data = await refresh_access_token(
+        account.refresh_token
+    )
+
+    account.access_token = token_data["access_token"]
+
+    expires_in = token_data.get(
+        "expires_in",
+        3600,
+    )
+
+    account.token_expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=expires_in)
+    )
+
+    # Spotify may return a new refresh token.
+    if token_data.get("refresh_token"):
+        account.refresh_token = token_data["refresh_token"]
+
+    return account.access_token
