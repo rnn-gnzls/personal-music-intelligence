@@ -8,8 +8,10 @@ from app.db.models.track import Track
 from app.db.models.listening_history import ListeningHistory
 from app.db.models.spotify_account import SpotifyAccount
 from app.db.models.spotify_sync_log import SpotifySyncLog
+from app.db.models.track_features import TrackFeatures
 
 from app.services.spotify import (
+    get_audio_features,
     get_recently_played,
     get_top_artists,
     get_top_tracks,
@@ -191,6 +193,79 @@ async def sync_tracks(
     await db.flush()
     return synced
 
+async def sync_track_features(
+    db: AsyncSession,
+    access_token: str,
+    tracks: list[Track],
+) -> int:
+    synced = 0
+
+    for track in tracks:
+        try:
+            audio_features = await get_audio_features(
+                access_token,
+                track.spotify_track_id,
+            )
+        except Exception as exc:
+            print(
+                f"AUDIO FEATURES ERROR "
+                f"{track.spotify_track_id}: {exc}"
+            )
+            continue
+
+        if not audio_features:
+            continue
+
+        result = await db.execute(
+            select(TrackFeatures).where(
+                TrackFeatures.track_id == track.id
+            )
+        )
+
+        track_features = result.scalar_one_or_none()
+
+        if not track_features:
+            track_features = TrackFeatures(
+                track_id=track.id,
+            )
+            db.add(track_features)
+
+        track_features.energy = audio_features.get(
+            "energy"
+        )
+
+        track_features.danceability = audio_features.get(
+            "danceability"
+        )
+
+        track_features.valence = audio_features.get(
+            "valence"
+        )
+
+        track_features.acousticness = audio_features.get(
+            "acousticness"
+        )
+
+        track_features.instrumentalness = (
+            audio_features.get(
+                "instrumentalness"
+            )
+        )
+
+        track_features.speechiness = audio_features.get(
+            "speechiness"
+        )
+
+        track_features.tempo = audio_features.get(
+            "tempo"
+        )
+
+        synced += 1
+
+    await db.flush()
+
+    return synced
+
 async def sync_recently_played(
     db: AsyncSession,
     user_id,
@@ -305,6 +380,18 @@ async def sync_spotify_data(
             ],
         )
 
+        result = await db.execute(
+            select(Track)
+        )
+
+        all_tracks = result.scalars().all()[:5] # test with 5 tracks first before syncing all tracks
+
+        feature_count = await sync_track_features(
+            db,
+            access_token,
+            all_tracks,
+        )
+
         recent_count = await sync_recently_played(
             db,
             user_id,
@@ -329,12 +416,10 @@ async def sync_spotify_data(
         await db.commit()
 
         return {
-            "artists": artist_count,
-            "top_tracks": len(
-                top_tracks_data["items"]
-            ),
+            "artists": len(top_artists_data["items"]),
+            "top_tracks": len(top_tracks_data["items"]),
             "recently_played": recent_count,
-            "status": "success",
+            "track_features": feature_count,
         }
 
     except Exception as exc:

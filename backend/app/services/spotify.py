@@ -79,7 +79,24 @@ async def spotify_get(
             params=params,
         )
 
+        print(
+            "\n========== SPOTIFY API DEBUG =========="
+        )
+        print(
+            f"STATUS: {response.status_code}"
+        )
+        print(
+            f"ENDPOINT: {endpoint}"
+        )
+        print(
+            f"RESPONSE: {response.text[:1000]}"
+        )
+        print(
+            "========================================\n"
+        )
+
     response.raise_for_status()
+
     return response.json()
 
 async def get_top_artists(
@@ -117,6 +134,15 @@ async def get_recently_played(
         {
             "limit": 50,
         },
+    )
+
+async def get_audio_features(
+    access_token: str,
+    track_id: str,
+) -> dict:
+    return await spotify_get(
+        access_token,
+        f"/audio-features/{track_id}",
     )
 
 async def refresh_access_token(refresh_token: str) -> dict:

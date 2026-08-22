@@ -129,7 +129,7 @@ Phase 7 - Music Analytics
 
 Phase 8 - Recommendation Engine
 
-### Planned
+### On going
 
 - Song recommendation system
 - Artist recommendation system
@@ -143,7 +143,7 @@ Phase 8 - Recommendation Engine
 
 Phase 9 - Business Intelligence
 
-### Planned
+### On going
 
 - Power BI dashboard
 - Tableau dashboard
