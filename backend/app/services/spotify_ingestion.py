@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,12 +13,17 @@ from app.db.models.spotify_sync_log import SpotifySyncLog
 from app.db.models.track_features import TrackFeatures
 
 from app.services.spotify import (
-    get_audio_features,
     get_recently_played,
     get_top_artists,
     get_top_tracks,
     get_valid_access_token,
 )
+
+from app.audio.feature_extractor import extract_audio_features
+
+
+AUDIO_FILES_DIR = Path("audio_files")
+
 
 async def get_spotify_account(
     db: AsyncSession,
@@ -28,17 +35,19 @@ async def get_spotify_account(
             SpotifyAccount.user_id == user_id
         )
     )
+
     account = result.scalar_one_or_none()
 
     if not account:
         raise ValueError(
             "Spotify account is not connected."
         )
+
     return account
+
 
 async def sync_artists(
     db: AsyncSession,
-    access_token: str,
     artists: list[dict],
 ):
     synced = 0
@@ -58,6 +67,7 @@ async def sync_artists(
 
         if artist:
             artist.name = spotify_artist["name"]
+
         else:
             artist = Artist(
                 spotify_artist_id=spotify_artist_id,
@@ -69,7 +79,9 @@ async def sync_artists(
         synced += 1
 
     await db.flush()
+
     return synced
+
 
 async def sync_tracks(
     db: AsyncSession,
@@ -81,72 +93,93 @@ async def sync_tracks(
 
         spotify_track_id = spotify_track["id"]
 
-        # Find/create artists
+        # -----------------------------------------
+        # ARTIST
+        # -----------------------------------------
+
         for spotify_artist in spotify_track["artists"]:
+
             result = await db.execute(
                 select(Artist).where(
                     Artist.spotify_artist_id
                     == spotify_artist["id"]
                 )
             )
+
             artist = result.scalar_one_or_none()
 
             if not artist:
+
                 artist = Artist(
                     spotify_artist_id=spotify_artist["id"],
                     name=spotify_artist["name"],
                 )
 
                 db.add(artist)
+
                 await db.flush()
 
-        # Get primary artist
         result = await db.execute(
             select(Artist).where(
                 Artist.spotify_artist_id
                 == spotify_track["artists"][0]["id"]
             )
         )
+
         artist = result.scalar_one()
 
-        # Album
+        # -----------------------------------------
+        # ALBUM
+        # -----------------------------------------
+
         spotify_album = spotify_track["album"]
 
         result = await db.execute(
             select(Album).where(
-                Album.spotify_album_id == spotify_album["id"]
+                Album.spotify_album_id
+                == spotify_album["id"]
             )
         )
 
         album = result.scalar_one_or_none()
 
         release_date = None
-        raw_release_date = spotify_album.get("release_date")
+
+        raw_release_date = spotify_album.get(
+            "release_date"
+        )
 
         if raw_release_date:
+
             try:
+
                 if len(raw_release_date) == 10:
+
                     release_date = datetime.strptime(
                         raw_release_date,
                         "%Y-%m-%d",
                     ).date()
 
                 elif len(raw_release_date) == 7:
+
                     release_date = datetime.strptime(
                         raw_release_date,
                         "%Y-%m",
                     ).date()
 
                 elif len(raw_release_date) == 4:
+
                     release_date = datetime.strptime(
                         raw_release_date,
                         "%Y",
                     ).date()
 
             except ValueError:
+
                 release_date = None
 
         if not album:
+
             album = Album(
                 spotify_album_id=spotify_album["id"],
                 name=spotify_album["name"],
@@ -155,13 +188,18 @@ async def sync_tracks(
             )
 
             db.add(album)
+
             await db.flush()
 
         else:
+
             album.name = spotify_album["name"]
             album.release_date = release_date
 
-        # Track
+        # -----------------------------------------
+        # TRACK
+        # -----------------------------------------
+
         result = await db.execute(
             select(Track).where(
                 Track.spotify_track_id
@@ -178,7 +216,9 @@ async def sync_tracks(
                 name=spotify_track["name"],
                 artist_id=artist.id,
                 album_id=album.id,
-                duration_ms=spotify_track["duration_ms"],
+                duration_ms=spotify_track.get(
+                    "duration_ms"
+                ),
             )
 
             db.add(track)
@@ -186,91 +226,163 @@ async def sync_tracks(
         else:
 
             track.name = spotify_track["name"]
-            track.duration_ms = spotify_track["duration_ms"]
+
+            track.duration_ms = spotify_track.get(
+                "duration_ms"
+            )
 
         synced += 1
 
     await db.flush()
+
     return synced
 
-async def sync_track_features(
+
+async def sync_local_audio_features(
     db: AsyncSession,
-    access_token: str,
-    tracks: list[Track],
 ) -> int:
+
     synced = 0
 
-    for track in tracks:
-        try:
-            audio_features = await get_audio_features(
-                access_token,
-                track.spotify_track_id,
+    if not AUDIO_FILES_DIR.exists():
+        return 0
+
+    audio_files = [
+        path
+        for path in AUDIO_FILES_DIR.iterdir()
+        if path.is_file()
+        and path.suffix.lower()
+        in {
+            ".mp3",
+            ".wav",
+            ".flac",
+            ".m4a",
+            ".ogg",
+        }
+    ]
+
+    for audio_file in audio_files:
+
+        spotify_track_id = audio_file.stem
+
+        # -----------------------------------------
+        # FIND TRACK
+        # -----------------------------------------
+
+        result = await db.execute(
+            select(Track).where(
+                Track.spotify_track_id
+                == spotify_track_id
             )
-        except Exception as exc:
+        )
+
+        track = result.scalar_one_or_none()
+
+        if not track:
+
             print(
-                f"AUDIO FEATURES ERROR "
-                f"{track.spotify_track_id}: {exc}"
+                f"AUDIO SKIPPED: "
+                f"No database track found for "
+                f"{audio_file.name}"
             )
+
             continue
 
-        if not audio_features:
+        # -----------------------------------------
+        # ANALYZE AUDIO
+        # -----------------------------------------
+
+        try:
+
+            features = extract_audio_features(
+                str(audio_file)
+            )
+
+        except Exception as exc:
+
+            print(
+                f"AUDIO ANALYSIS ERROR "
+                f"{audio_file.name}: {exc}"
+            )
+
             continue
+
+        if not features:
+            continue
+
+        # -----------------------------------------
+        # FIND / CREATE FEATURES
+        # -----------------------------------------
 
         result = await db.execute(
             select(TrackFeatures).where(
-                TrackFeatures.track_id == track.id
+                TrackFeatures.track_id
+                == track.id
             )
         )
 
-        track_features = result.scalar_one_or_none()
+        track_features = (
+            result.scalar_one_or_none()
+        )
 
         if not track_features:
+
             track_features = TrackFeatures(
-                track_id=track.id,
+                track_id=track.id
             )
+
             db.add(track_features)
 
-        track_features.energy = audio_features.get(
+        # -----------------------------------------
+        # SAVE FEATURES
+        # -----------------------------------------
+
+        track_features.energy = features.get(
             "energy"
         )
 
-        track_features.danceability = audio_features.get(
+        track_features.danceability = features.get(
             "danceability"
         )
 
-        track_features.valence = audio_features.get(
+        track_features.valence = features.get(
             "valence"
         )
 
-        track_features.acousticness = audio_features.get(
+        track_features.acousticness = features.get(
             "acousticness"
         )
 
-        track_features.instrumentalness = (
-            audio_features.get(
-                "instrumentalness"
-            )
+        track_features.instrumentalness = features.get(
+            "instrumentalness"
         )
 
-        track_features.speechiness = audio_features.get(
+        track_features.speechiness = features.get(
             "speechiness"
         )
 
-        track_features.tempo = audio_features.get(
+        track_features.tempo = features.get(
             "tempo"
         )
 
         synced += 1
 
+        print(
+            f"AUDIO FEATURES SYNCED: "
+            f"{track.name} - {track_features}"
+        )
+
     await db.flush()
 
     return synced
+
 
 async def sync_recently_played(
     db: AsyncSession,
     user_id,
     recently_played: list[dict],
 ):
+
     synced = 0
 
     for item in recently_played:
@@ -296,7 +408,6 @@ async def sync_recently_played(
             )
         )
 
-        # Prevent duplicate listening records
         result = await db.execute(
             select(ListeningHistory).where(
                 ListeningHistory.user_id == user_id,
@@ -322,12 +433,15 @@ async def sync_recently_played(
         synced += 1
 
     await db.flush()
+
     return synced
+
 
 async def sync_spotify_data(
     db: AsyncSession,
     user_id,
 ):
+
     started_at = datetime.now(timezone.utc)
 
     sync_log = SpotifySyncLog(
@@ -337,9 +451,11 @@ async def sync_spotify_data(
     )
 
     db.add(sync_log)
+
     await db.flush()
 
     try:
+
         account = await get_spotify_account(
             db,
             user_id,
@@ -348,6 +464,10 @@ async def sync_spotify_data(
         access_token = await get_valid_access_token(
             account
         )
+
+        # -----------------------------------------
+        # SPOTIFY METADATA
+        # -----------------------------------------
 
         top_artists_data = await get_top_artists(
             access_token
@@ -361,9 +481,12 @@ async def sync_spotify_data(
             access_token
         )
 
+        # -----------------------------------------
+        # DATABASE SYNC
+        # -----------------------------------------
+
         artist_count = await sync_artists(
             db,
-            access_token,
             top_artists_data["items"],
         )
 
@@ -380,23 +503,29 @@ async def sync_spotify_data(
             ],
         )
 
-        result = await db.execute(
-            select(Track)
+        # -----------------------------------------
+        # LOCAL AUDIO ANALYSIS
+        # -----------------------------------------
+
+        feature_count = (
+            await sync_local_audio_features(
+                db
+            )
         )
 
-        all_tracks = result.scalars().all()[:5] # test with 5 tracks first before syncing all tracks
-
-        feature_count = await sync_track_features(
-            db,
-            access_token,
-            all_tracks,
-        )
+        # -----------------------------------------
+        # LISTENING HISTORY
+        # -----------------------------------------
 
         recent_count = await sync_recently_played(
             db,
             user_id,
             recently_played_data["items"],
         )
+
+        # -----------------------------------------
+        # SYNC LOG
+        # -----------------------------------------
 
         sync_log.completed_at = datetime.now(
             timezone.utc
@@ -408,7 +537,9 @@ async def sync_spotify_data(
 
         sync_log.tracks_synced = (
             len(top_tracks_data["items"])
-            + len(recently_played_data["items"])
+            + len(
+                recently_played_data["items"]
+            )
         )
 
         sync_log.history_synced = recent_count
@@ -416,13 +547,18 @@ async def sync_spotify_data(
         await db.commit()
 
         return {
-            "artists": len(top_artists_data["items"]),
-            "top_tracks": len(top_tracks_data["items"]),
+            "artists": len(
+                top_artists_data["items"]
+            ),
+            "top_tracks": len(
+                top_tracks_data["items"]
+            ),
             "recently_played": recent_count,
             "track_features": feature_count,
         }
 
     except Exception as exc:
+
         sync_log.completed_at = datetime.now(
             timezone.utc
         )

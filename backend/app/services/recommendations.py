@@ -1,4 +1,4 @@
-from collections import Counter
+from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,49 @@ FEATURES = [
 
 
 # ============================================================
+# LOCAL AUDIO
+# ============================================================
+
+def get_local_audio_track_ids() -> set[str]:
+    """
+    Return Spotify track IDs for locally downloaded audio files.
+
+    Files are expected to use the Spotify track ID as filename:
+
+        audio_files/<spotify_track_id>.mp3
+        audio_files/<spotify_track_id>.wav
+        audio_files/<spotify_track_id>.flac
+        audio_files/<spotify_track_id>.m4a
+
+    These tracks are excluded from recommendations because they
+    are locally owned/analyzed tracks, not discovery candidates.
+    """
+
+    audio_directory = Path("audio_files")
+
+    if not audio_directory.exists():
+        return set()
+
+    supported_extensions = {
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".m4a",
+        ".ogg",
+    }
+
+    return {
+        file_path.stem
+        for file_path in audio_directory.iterdir()
+        if (
+            file_path.is_file()
+            and file_path.suffix.lower()
+            in supported_extensions
+        )
+    }
+
+
+# ============================================================
 # USER PROFILE
 # ============================================================
 
@@ -28,6 +71,7 @@ async def get_user_profile(
     db: AsyncSession,
     user_id,
 ) -> dict:
+
     result = await db.execute(
         select(
             TrackFeatures.energy,
@@ -62,6 +106,7 @@ async def get_user_profile(
     profile = {}
 
     for index, feature in enumerate(FEATURES):
+
         values = [
             row[index]
             for row in rows
@@ -78,38 +123,17 @@ async def get_user_profile(
 
 
 # ============================================================
-# LISTENING HISTORY
+# LISTENED TRACKS
 # ============================================================
 
 async def get_listened_track_ids(
     db: AsyncSession,
     user_id,
 ) -> set:
+
     result = await db.execute(
         select(
             ListeningHistory.track_id
-        ).where(
-            ListeningHistory.user_id == user_id
-        )
-    )
-
-    return {
-        row[0]
-        for row in result.all()
-    }
-
-
-async def get_listened_artist_ids(
-    db: AsyncSession,
-    user_id,
-) -> set:
-    result = await db.execute(
-        select(
-            Track.artist_id
-        )
-        .join(
-            ListeningHistory,
-            ListeningHistory.track_id == Track.id,
         )
         .where(
             ListeningHistory.user_id == user_id
@@ -123,16 +147,47 @@ async def get_listened_artist_ids(
 
 
 # ============================================================
-# SIMILARITY
+# LISTENED ARTISTS
+# ============================================================
+
+async def get_listened_artist_ids(
+    db: AsyncSession,
+    user_id,
+) -> set:
+
+    result = await db.execute(
+        select(
+            Track.artist_id
+        )
+        .join(
+            ListeningHistory,
+            ListeningHistory.track_id == Track.id,
+        )
+        .where(
+            ListeningHistory.user_id == user_id
+        )
+        .distinct()
+    )
+
+    return {
+        row[0]
+        for row in result.all()
+    }
+
+
+# ============================================================
+# FEATURE SIMILARITY
 # ============================================================
 
 def calculate_feature_similarity(
     profile: dict,
     candidate,
 ) -> float:
+
     differences = []
 
     for feature in FEATURES:
+
         user_value = profile.get(feature)
 
         candidate_value = getattr(
@@ -148,13 +203,13 @@ def calculate_feature_similarity(
             continue
 
         if feature == "tempo":
-            difference = (
-                abs(
-                    user_value - candidate_value
-                )
-                / 200
-            )
+
+            difference = abs(
+                user_value - candidate_value
+            ) / 200
+
         else:
+
             difference = abs(
                 user_value - candidate_value
             )
@@ -173,12 +228,12 @@ def calculate_feature_similarity(
 
     return max(
         0.0,
-        min(similarity, 1.0),
+        similarity,
     )
 
 
 # ============================================================
-# RECOMMENDATION SCORE
+# FINAL RECOMMENDATION SCORE
 # ============================================================
 
 def calculate_recommendation_score(
@@ -187,6 +242,10 @@ def calculate_recommendation_score(
     novelty_score: float,
     discovery_score: float,
 ) -> float:
+    """
+    Combine recommendation signals into a final 0-100 score.
+    """
+
     final_score = (
         similarity_score * 0.50
         + context_score * 0.25
@@ -196,7 +255,7 @@ def calculate_recommendation_score(
 
     return round(
         final_score,
-        4,
+        2,
     )
 
 
@@ -215,26 +274,14 @@ async def get_song_recommendations(
         user_id,
     )
 
-    listened_track_ids = (
-        await get_listened_track_ids(
-            db,
-            user_id,
-        )
+    listened_ids = await get_listened_track_ids(
+        db,
+        user_id,
     )
 
-    listened_artist_ids = (
-        await get_listened_artist_ids(
-            db,
-            user_id,
-        )
-    )
-
-    # No listening profile yet.
-    if not any(
-        value is not None
-        for value in profile.values()
-    ):
-        return []
+    # IMPORTANT:
+    # Never recommend locally downloaded/analyzed tracks.
+    local_audio_ids = get_local_audio_track_ids()
 
     result = await db.execute(
         select(
@@ -252,57 +299,106 @@ async def get_song_recommendations(
         )
     )
 
-    recommendations = []
+    candidates = []
 
     for track, artist_name, features in result.all():
 
-        # Never recommend something the user
-        # has already listened to.
-        if track.id in listened_track_ids:
+        spotify_track_id = track.spotify_track_id
+
+        # ----------------------------------------------------
+        # FILTER 1: already listened
+        # ----------------------------------------------------
+
+        if track.id in listened_ids:
             continue
 
-        similarity_score = (
-            calculate_feature_similarity(
-                profile,
-                features,
-            )
+        # ----------------------------------------------------
+        # FILTER 2: locally downloaded/analyzed
+        # ----------------------------------------------------
+
+        if spotify_track_id in local_audio_ids:
+            continue
+
+        # ----------------------------------------------------
+        # FEATURE SIMILARITY
+        # ----------------------------------------------------
+
+        similarity = calculate_feature_similarity(
+            profile,
+            features,
         )
 
-        # Context score:
-        # currently based on similarity to the
-        # user's overall audio profile.
-        context_score = similarity_score
+        if similarity <= 0:
+            continue
 
-        # Since this is a NEW track,
-        # it receives a strong novelty score.
+        # ----------------------------------------------------
+        # NOVELTY
+        #
+        # Completely new track = high novelty.
+        # Already excluded listened tracks, therefore 1.0.
+        # ----------------------------------------------------
+
         novelty_score = 1.0
 
-        # New artist = discovery opportunity.
-        discovery_score = (
-            1.0
-            if track.artist_id
-            not in listened_artist_ids
-            else 0.0
+        # ----------------------------------------------------
+        # DISCOVERY
+        #
+        # Slight boost for tracks whose artist has not been
+        # listened to before.
+        # ----------------------------------------------------
+
+        artist_result = await db.execute(
+            select(ListeningHistory.id)
+            .join(
+                Track,
+                Track.id == ListeningHistory.track_id,
+            )
+            .where(
+                ListeningHistory.user_id == user_id,
+                Track.artist_id == track.artist_id,
+            )
+            .limit(1)
         )
+
+        artist_already_listened = (
+            artist_result.scalar_one_or_none()
+            is not None
+        )
+
+        discovery_score = (
+            0.0
+            if artist_already_listened
+            else 1.0
+        )
+
+        # ----------------------------------------------------
+        # CONTEXT
+        #
+        # Base context score for now.
+        # Mood-specific recommendations use their own score.
+        # ----------------------------------------------------
+
+        context_score = similarity
 
         final_score = calculate_recommendation_score(
-            similarity_score,
-            context_score,
-            novelty_score,
-            discovery_score,
+            similarity_score=similarity,
+            context_score=context_score,
+            novelty_score=novelty_score,
+            discovery_score=discovery_score,
         )
 
-        recommendations.append(
+        candidates.append(
             {
                 "track_id": str(track.id),
+                "spotify_track_id": spotify_track_id,
                 "track": track.name,
                 "artist": artist_name,
-                "similarity_score": round(
-                    similarity_score * 100,
+                "score": round(
+                    final_score * 100,
                     2,
                 ),
-                "context_score": round(
-                    context_score * 100,
+                "similarity_score": round(
+                    similarity * 100,
                     2,
                 ),
                 "novelty_score": round(
@@ -313,28 +409,19 @@ async def get_song_recommendations(
                     discovery_score * 100,
                     2,
                 ),
-                "score": round(
-                    final_score * 100,
-                    2,
-                ),
                 "reason": (
-                    "Recommended because its audio profile "
-                    "matches your listening taste."
-                    if discovery_score == 0
-                    else
-                    "Recommended because it matches your "
-                    "listening taste while introducing a "
-                    "new artist."
+                    "New song with an audio profile "
+                    "similar to your listening taste."
                 ),
             }
         )
 
-    recommendations.sort(
+    candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-    return recommendations[:limit]
+    return candidates[:limit]
 
 
 # ============================================================
@@ -347,124 +434,99 @@ async def get_artist_recommendations(
     limit: int = 10,
 ) -> list[dict]:
 
-    profile = await get_user_profile(
-        db,
-        user_id,
-    )
+    # ---------------------------------------------------------
+    # Get artists already listened to by the user
+    # ---------------------------------------------------------
 
-    listened_artist_ids = (
-        await get_listened_artist_ids(
-            db,
-            user_id,
+    listened_artist_result = await db.execute(
+        select(
+            Track.artist_id
         )
+        .join(
+            ListeningHistory,
+            ListeningHistory.track_id == Track.id,
+        )
+        .where(
+            ListeningHistory.user_id == user_id
+        )
+        .distinct()
     )
 
-    # Find artists that have tracks with
-    # available audio features.
+    listened_artist_ids = {
+        row[0]
+        for row in listened_artist_result.all()
+    }
+
+    # ---------------------------------------------------------
+    # Get all artists that have tracks
+    # ---------------------------------------------------------
+
     result = await db.execute(
         select(
             Artist.id,
             Artist.name,
-            TrackFeatures,
+            func.count(Track.id).label("track_count"),
         )
         .join(
             Track,
             Track.artist_id == Artist.id,
         )
-        .join(
-            TrackFeatures,
-            TrackFeatures.track_id == Track.id,
+        .group_by(
+            Artist.id,
+            Artist.name,
         )
     )
 
-    artist_candidates = {}
+    candidates = []
 
-    for artist_id, artist_name, features in result.all():
+    for row in result.all():
 
-        # IMPORTANT:
-        # Skip artists the user has already listened to.
-        if artist_id in listened_artist_ids:
+        # -----------------------------------------------------
+        # HARD FILTER:
+        # Never recommend an artist already listened to
+        # -----------------------------------------------------
+
+        if row.id in listened_artist_ids:
             continue
 
-        similarity = calculate_feature_similarity(
-            profile,
-            features,
+        # -----------------------------------------------------
+        # Basic discovery score
+        #
+        # Artists with more available tracks get a slightly
+        # higher discovery score because they provide more
+        # recommendation opportunities.
+        # -----------------------------------------------------
+
+        discovery_score = min(
+            row.track_count * 10,
+            100,
         )
 
-        if artist_id not in artist_candidates:
-            artist_candidates[artist_id] = {
-                "artist_id": str(artist_id),
-                "artist": artist_name,
-                "similarities": [],
-            }
-
-        artist_candidates[
-            artist_id
-        ]["similarities"].append(
-            similarity
-        )
-
-    recommendations = []
-
-    for candidate in artist_candidates.values():
-
-        similarities = candidate["similarities"]
-
-        if not similarities:
-            continue
-
-        similarity_score = (
-            sum(similarities)
-            / len(similarities)
-        )
-
-        context_score = similarity_score
-
-        # Every artist here is new to the user.
-        novelty_score = 1.0
-
-        # New artist = discovery.
-        discovery_score = 1.0
-
-        final_score = calculate_recommendation_score(
-            similarity_score,
-            context_score,
-            novelty_score,
-            discovery_score,
-        )
-
-        recommendations.append(
+        candidates.append(
             {
-                "artist_id": candidate["artist_id"],
-                "artist": candidate["artist"],
-                "similarity_score": round(
-                    similarity_score * 100,
-                    2,
-                ),
-                "context_score": round(
-                    context_score * 100,
-                    2,
-                ),
-                "novelty_score": 100.0,
-                "discovery_score": 100.0,
+                "artist_id": str(row.id),
+                "artist": row.name,
                 "score": round(
-                    final_score * 100,
+                    discovery_score,
                     2,
                 ),
                 "reason": (
-                    "New artist whose music matches "
-                    "your listening profile."
+                    "New artist you haven't listened to "
+                    "yet."
                 ),
             }
         )
 
-    recommendations.sort(
+    # ---------------------------------------------------------
+    # Sort only after filtering known artists
+    # ---------------------------------------------------------
+
+    candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-    return recommendations[:limit]
-
+    return candidates[:limit]
 
 # ============================================================
 # MOOD RECOMMENDATIONS
@@ -478,31 +540,25 @@ async def get_mood_recommendations(
 ) -> list[dict]:
 
     mood_ranges = {
+
         "happy": {
-            "valence": 0.75,
-            "energy": 0.65,
+            "valence": 0.7,
+            "energy": 0.6,
         },
+
         "sad": {
-            "valence": 0.25,
-            "energy": 0.40,
+            "valence": 0.3,
+            "energy": 0.4,
         },
+
         "energetic": {
-            "energy": 0.85,
-            "valence": 0.60,
+            "energy": 0.8,
+            "valence": 0.5,
         },
+
         "calm": {
-            "energy": 0.30,
-            "acousticness": 0.60,
-        },
-        "romantic": {
-            "valence": 0.60,
-            "energy": 0.40,
-            "acousticness": 0.45,
-        },
-        "focus": {
-            "energy": 0.40,
-            "instrumentalness": 0.35,
-            "speechiness": 0.10,
+            "energy": 0.3,
+            "acousticness": 0.5,
         },
     }
 
@@ -513,19 +569,14 @@ async def get_mood_recommendations(
     if not target:
         return []
 
-    listened_track_ids = (
-        await get_listened_track_ids(
-            db,
-            user_id,
-        )
+    listened_ids = await get_listened_track_ids(
+        db,
+        user_id,
     )
 
-    listened_artist_ids = (
-        await get_listened_artist_ids(
-            db,
-            user_id,
-        )
-    )
+    # IMPORTANT:
+    # Never recommend the locally downloaded test track.
+    local_audio_ids = get_local_audio_track_ids()
 
     result = await db.execute(
         select(
@@ -547,8 +598,18 @@ async def get_mood_recommendations(
 
     for track, artist_name, features in result.all():
 
-        # Only NEW songs.
-        if track.id in listened_track_ids:
+        # ----------------------------------------------------
+        # FILTER 1: already listened
+        # ----------------------------------------------------
+
+        if track.id in listened_ids:
+            continue
+
+        # ----------------------------------------------------
+        # FILTER 2: local audio
+        # ----------------------------------------------------
+
+        if track.spotify_track_id in local_audio_ids:
             continue
 
         differences = []
@@ -561,27 +622,31 @@ async def get_mood_recommendations(
                 None,
             )
 
-            if value is None:
-                continue
+            if value is not None:
 
-            if feature == "tempo":
-                difference = (
-                    abs(value - target_value)
-                    / 200
-                )
-            else:
-                difference = abs(
-                    value - target_value
-                )
+                if feature == "tempo":
 
-            differences.append(
-                min(difference, 1)
-            )
+                    difference = abs(
+                        value - target_value
+                    ) / 200
+
+                else:
+
+                    difference = abs(
+                        value - target_value
+                    )
+
+                differences.append(
+                    min(
+                        difference,
+                        1,
+                    )
+                )
 
         if not differences:
             continue
 
-        context_score = max(
+        mood_similarity = max(
             0.0,
             1 - (
                 sum(differences)
@@ -589,70 +654,62 @@ async def get_mood_recommendations(
             ),
         )
 
-        # New track.
+        # New track = maximum novelty.
         novelty_score = 1.0
 
-        # New artist gets discovery bonus.
+        # ----------------------------------------------------
+        # Check whether artist is new.
+        # ----------------------------------------------------
+
+        artist_result = await db.execute(
+            select(ListeningHistory.id)
+            .join(
+                Track,
+                Track.id == ListeningHistory.track_id,
+            )
+            .where(
+                ListeningHistory.user_id == user_id,
+                Track.artist_id == track.artist_id,
+            )
+            .limit(1)
+        )
+
+        artist_already_listened = (
+            artist_result.scalar_one_or_none()
+            is not None
+        )
+
         discovery_score = (
-            1.0
-            if track.artist_id
-            not in listened_artist_ids
-            else 0.0
-        )
-
-        # User profile similarity is still useful
-        # so mood recommendations don't become
-        # completely disconnected from the user's taste.
-        profile = await get_user_profile(
-            db,
-            user_id,
-        )
-
-        similarity_score = (
-            calculate_feature_similarity(
-                profile,
-                features,
-            )
-            if any(
-                value is not None
-                for value in profile.values()
-            )
-            else context_score
+            0.0
+            if artist_already_listened
+            else 1.0
         )
 
         final_score = calculate_recommendation_score(
-            similarity_score,
-            context_score,
-            novelty_score,
-            discovery_score,
+            similarity_score=mood_similarity,
+            context_score=mood_similarity,
+            novelty_score=novelty_score,
+            discovery_score=discovery_score,
         )
 
         recommendations.append(
             {
                 "track_id": str(track.id),
+                "spotify_track_id": track.spotify_track_id,
                 "track": track.name,
                 "artist": artist_name,
-                "mood": mood,
-                "similarity_score": round(
-                    similarity_score * 100,
-                    2,
-                ),
-                "context_score": round(
-                    context_score * 100,
-                    2,
-                ),
-                "novelty_score": 100.0,
-                "discovery_score": round(
-                    discovery_score * 100,
-                    2,
-                ),
                 "score": round(
                     final_score * 100,
                     2,
                 ),
+                "mood": mood,
+                "similarity_score": round(
+                    mood_similarity * 100,
+                    2,
+                ),
                 "reason": (
-                    f"Matches a {mood.lower()} vibe "
-                    "while giving you something new."
+                    f"New song matching your "
+                    f"{mood} mood."
                 ),
             }
         )
